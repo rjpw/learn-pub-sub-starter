@@ -36,15 +36,39 @@ func startREPL(conn *amqp.Connection) {
 		os.Exit(1)
 	}
 
+	ch, err := conn.Channel()
+	if err != nil {
+		fmt.Println("Error creating broker channel")
+		os.Exit(1)
+	}
+
 	gameState := gamelogic.NewGameState(username)
 
-	// ch, queue, err := pubsub.DeclareAndBind(conn, routing.ExchangePerilDirect, fmt.Sprintf("pause.%s", username), routing.PauseKey, pubsub.Transient)
-	// if err != nil {
-	// 	fmt.Println(fmt.Errorf("Cannot declaring queue: %w", err))
-	// 	os.Exit(1)
-	// }
+	// ------------- PAUSE MESSAGES -----------------------
+	err = pubsub.SubscribeJSON(conn,
+		routing.ExchangePerilDirect,
+		fmt.Sprintf("pause.%s", username),
+		routing.PauseKey,
+		pubsub.Transient,
+		handlerPause(gameState))
 
-	pubsub.DeclareAndBind(conn, routing.ExchangePerilDirect, fmt.Sprintf("pause.%s", username), routing.PauseKey, pubsub.Transient)
+	if err != nil {
+		fmt.Println(fmt.Errorf("Unable to subscribe for pause messages: %w", err))
+		os.Exit(1)
+	}
+
+	// ------------- MOVE MESSAGES -----------------------
+	err = pubsub.SubscribeJSON(conn,
+		routing.ExchangePerilTopic,
+		fmt.Sprintf("%s.%s", routing.ArmyMovesPrefix, username),
+		fmt.Sprintf("%s.*", routing.ArmyMovesPrefix),
+		pubsub.Transient,
+		handlerMove(gameState))
+
+	if err != nil {
+		fmt.Println(fmt.Errorf("Unable to subscribe for move messages: %w", err))
+		os.Exit(1)
+	}
 
 	for {
 
@@ -61,12 +85,21 @@ func startREPL(conn *amqp.Connection) {
 				fmt.Println(fmt.Errorf("%w", err))
 			}
 		case "move":
-			_, err := gameState.CommandMove(input)
+
+			mv, err := gameState.CommandMove(input)
 			if err != nil {
 				fmt.Println(fmt.Errorf("%w", err))
 			} else {
 				fmt.Printf("%v\n", strings.Join(input, " "))
 			}
+
+			err = pubsub.PublishJSON(ch, routing.ExchangePerilTopic, fmt.Sprintf("%s.%s", routing.ArmyMovesPrefix, username), mv)
+			if err != nil {
+				fmt.Println(fmt.Errorf("%w", err))
+			} else {
+				fmt.Println("Move published successfully")
+			}
+
 		case "status":
 			gameState.CommandStatus()
 		case "spam":
@@ -85,4 +118,31 @@ func startREPL(conn *amqp.Connection) {
 
 	}
 
+}
+
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.Acktype {
+	return func(ps routing.PlayingState) pubsub.Acktype {
+		defer fmt.Print("> ")
+		gs.HandlePause(ps)
+		return pubsub.Ack
+	}
+}
+
+func handlerMove(gs *gamelogic.GameState) func(gamelogic.ArmyMove) pubsub.Acktype {
+	return func(mv gamelogic.ArmyMove) pubsub.Acktype {
+		defer fmt.Print("> ")
+		outcome := gs.HandleMove(mv)
+		switch outcome {
+		case gamelogic.MoveOutComeSafe:
+			fallthrough
+		case gamelogic.MoveOutcomeMakeWar:
+			fmt.Printf("Message disposition: %s\n", pubsub.Ack)
+			return pubsub.Ack
+		case gamelogic.MoveOutcomeSamePlayer:
+			fallthrough
+		default:
+			fmt.Printf("Message disposition: %s\n", pubsub.NackDiscard)
+			return pubsub.NackDiscard
+		}
+	}
 }
