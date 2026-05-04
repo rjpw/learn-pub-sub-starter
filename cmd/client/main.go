@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -117,7 +118,25 @@ func startREPL(conn *amqp.Connection) {
 		case "status":
 			gameState.CommandStatus()
 		case "spam":
-			fmt.Println("Spamming not allowed yet!")
+			if len(input) < 2 {
+				fmt.Println("Usage: spam <n>")
+			} else {
+				i, err := strconv.Atoi(input[1])
+				if err != nil {
+					fmt.Printf("Error parsing int from %s\n", input[1])
+				}
+				if i < 1 {
+					fmt.Println("Spam count must be greater than 0")
+				}
+				for range i {
+					msg := gamelogic.GetMaliciousLog()
+					err = pubsub.PublishGob(ch, routing.ExchangePerilTopic, fmt.Sprintf("%s.%s", routing.GameLogSlug, username), routing.GameLog{
+						CurrentTime: time.Now(),
+						Message:     msg,
+						Username:    username,
+					})
+				}
+			}
 		case "quit":
 			gamelogic.PrintQuit()
 			return
