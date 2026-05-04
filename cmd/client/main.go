@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/gamelogic"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/pubsub"
@@ -76,7 +77,7 @@ func startREPL(conn *amqp.Connection) {
 		"war",
 		fmt.Sprintf("%s.*", routing.WarRecognitionsPrefix),
 		pubsub.Durable,
-		handlerWar(gameState))
+		handlerWar(gameState, ch))
 
 	if err != nil {
 		fmt.Println(fmt.Errorf("Unable to subscribe for war messages: %w", err))
@@ -172,23 +173,67 @@ func handlerMove(gs *gamelogic.GameState, replyChannel *amqp.Channel) func(gamel
 	}
 }
 
-func handlerWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.Acktype {
+func outcomeMessage(outcome gamelogic.WarOutcome, winner, loser string) string {
+	switch outcome {
+	case gamelogic.WarOutcomeNotInvolved:
+		return ""
+	case gamelogic.WarOutcomeNoUnits:
+		return ""
+	case gamelogic.WarOutcomeOpponentWon:
+		fallthrough
+	case gamelogic.WarOutcomeYouWon:
+		return fmt.Sprintf("%s won a war against %s", winner, loser)
+	case gamelogic.WarOutcomeDraw:
+		return fmt.Sprintf("A war between %s and %s resulted in a draw", winner, loser)
+	default:
+		return ""
+	}
+}
+
+func publishLog(msg, username string, logChannel *amqp.Channel) error {
+	err := pubsub.PublishGob(logChannel,
+		routing.ExchangePerilTopic,
+		fmt.Sprintf("%s.%s", routing.GameLogSlug, username),
+		routing.GameLog{
+			CurrentTime: time.Now(),
+			Message:     msg,
+			Username:    username,
+		})
+
+	if err != nil {
+		fmt.Printf("Error sending log: %s\n", err.Error())
+		return err
+	}
+
+	return nil
+}
+
+func handlerWar(gs *gamelogic.GameState, replyChannel *amqp.Channel) func(gamelogic.RecognitionOfWar) pubsub.Acktype {
 	return func(rw gamelogic.RecognitionOfWar) pubsub.Acktype {
 		defer fmt.Print("> ")
-		outcome, _, _ := gs.HandleWar(rw)
-		switch outcome {
-		case gamelogic.WarOutcomeNotInvolved:
+
+		outcome, winner, loser := gs.HandleWar(rw)
+		msg := outcomeMessage(outcome, winner, loser)
+		err := publishLog(msg, gs.GetUsername(), replyChannel)
+		if err != nil {
 			return pubsub.NackRequeue
-		case gamelogic.WarOutcomeNoUnits:
-			return pubsub.NackDiscard
-		case gamelogic.WarOutcomeOpponentWon:
-			fallthrough
-		case gamelogic.WarOutcomeYouWon:
-			fallthrough
-		case gamelogic.WarOutcomeDraw:
+		} else {
 			return pubsub.Ack
-		default:
-			return pubsub.NackDiscard
 		}
+
+		// switch outcome {
+		// case gamelogic.WarOutcomeNotInvolved:
+		// 	return pubsub.NackRequeue
+		// case gamelogic.WarOutcomeNoUnits:
+		// 	return pubsub.NackDiscard
+		// case gamelogic.WarOutcomeOpponentWon:
+		// 	fallthrough
+		// case gamelogic.WarOutcomeYouWon:
+		// 	fallthrough
+		// case gamelogic.WarOutcomeDraw:
+		// 	return pubsub.Ack
+		// default:
+		// 	return pubsub.NackDiscard
+		// }
 	}
 }

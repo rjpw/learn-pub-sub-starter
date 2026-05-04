@@ -28,7 +28,9 @@ func main() {
 
 func startREPL(conn *amqp.Connection) {
 
-	pubsub.DeclareAndBind(conn, routing.ExchangePerilTopic, routing.GameLogSlug, "game_logs.*", pubsub.Durable)
+	//pubsub.DeclareAndBind(conn, routing.ExchangePerilTopic, routing.GameLogSlug, "game_logs.*", pubsub.Durable)
+
+	err := pubsub.SubscribeGob(conn, routing.ExchangePerilTopic, routing.GameLogSlug, "game_logs.*", pubsub.Durable, publishLog())
 
 	ch, err := conn.Channel()
 	if err != nil {
@@ -67,4 +69,15 @@ func startREPL(conn *amqp.Connection) {
 
 	}
 
+}
+
+func publishLog() func(gl routing.GameLog) pubsub.Acktype {
+	return func(gl routing.GameLog) pubsub.Acktype {
+		defer fmt.Print("> ")
+		err := gamelogic.WriteLog(gl)
+		if err != nil {
+			return pubsub.NackRequeue
+		}
+		return pubsub.Ack
+	}
 }
