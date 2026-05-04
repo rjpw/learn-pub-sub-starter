@@ -44,7 +44,7 @@ func startREPL(conn *amqp.Connection) {
 
 	gameState := gamelogic.NewGameState(username)
 
-	// ------------- PAUSE MESSAGES -----------------------
+	// ------------- LISTEN FOR PAUSE MESSAGES -----------------------
 	err = pubsub.SubscribeJSON(conn,
 		routing.ExchangePerilDirect,
 		fmt.Sprintf("pause.%s", username),
@@ -57,16 +57,29 @@ func startREPL(conn *amqp.Connection) {
 		os.Exit(1)
 	}
 
-	// ------------- MOVE MESSAGES -----------------------
+	// ------------- LISTEN FOR MOVE MESSAGES -----------------------
 	err = pubsub.SubscribeJSON(conn,
 		routing.ExchangePerilTopic,
 		fmt.Sprintf("%s.%s", routing.ArmyMovesPrefix, username),
 		fmt.Sprintf("%s.*", routing.ArmyMovesPrefix),
 		pubsub.Transient,
-		handlerMove(gameState))
+		handlerMove(gameState, ch))
 
 	if err != nil {
 		fmt.Println(fmt.Errorf("Unable to subscribe for move messages: %w", err))
+		os.Exit(1)
+	}
+
+	// ------------- LISTEN FOR WAR MESSAGES -----------------------
+	err = pubsub.SubscribeJSON(conn,
+		routing.ExchangePerilTopic,
+		"war",
+		fmt.Sprintf("%s.*", routing.WarRecognitionsPrefix),
+		pubsub.Durable,
+		handlerWar(gameState))
+
+	if err != nil {
+		fmt.Println(fmt.Errorf("Unable to subscribe for war messages: %w", err))
 		os.Exit(1)
 	}
 
@@ -128,20 +141,53 @@ func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.Ack
 	}
 }
 
-func handlerMove(gs *gamelogic.GameState) func(gamelogic.ArmyMove) pubsub.Acktype {
+func handlerMove(gs *gamelogic.GameState, replyChannel *amqp.Channel) func(gamelogic.ArmyMove) pubsub.Acktype {
 	return func(mv gamelogic.ArmyMove) pubsub.Acktype {
 		defer fmt.Print("> ")
 		outcome := gs.HandleMove(mv)
 		switch outcome {
 		case gamelogic.MoveOutComeSafe:
-			fallthrough
+			fmt.Printf("Message disposition: %s\n", pubsub.Ack)
+			return pubsub.Ack
 		case gamelogic.MoveOutcomeMakeWar:
+			err := pubsub.PublishJSON(replyChannel,
+				routing.ExchangePerilTopic,
+				fmt.Sprintf("%s.%s", routing.WarRecognitionsPrefix, gs.GetUsername()),
+				gamelogic.RecognitionOfWar{
+					Attacker: mv.Player,
+					Defender: gs.GetPlayerSnap(),
+				})
+			if err != nil {
+				fmt.Printf("Message disposition: %s\n", pubsub.NackRequeue)
+				return pubsub.NackRequeue
+			}
 			fmt.Printf("Message disposition: %s\n", pubsub.Ack)
 			return pubsub.Ack
 		case gamelogic.MoveOutcomeSamePlayer:
 			fallthrough
 		default:
 			fmt.Printf("Message disposition: %s\n", pubsub.NackDiscard)
+			return pubsub.NackDiscard
+		}
+	}
+}
+
+func handlerWar(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.Acktype {
+	return func(rw gamelogic.RecognitionOfWar) pubsub.Acktype {
+		defer fmt.Print("> ")
+		outcome, _, _ := gs.HandleWar(rw)
+		switch outcome {
+		case gamelogic.WarOutcomeNotInvolved:
+			return pubsub.NackRequeue
+		case gamelogic.WarOutcomeNoUnits:
+			return pubsub.NackDiscard
+		case gamelogic.WarOutcomeOpponentWon:
+			fallthrough
+		case gamelogic.WarOutcomeYouWon:
+			fallthrough
+		case gamelogic.WarOutcomeDraw:
+			return pubsub.Ack
+		default:
 			return pubsub.NackDiscard
 		}
 	}
